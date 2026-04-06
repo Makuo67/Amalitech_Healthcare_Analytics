@@ -1,0 +1,157 @@
+Question 1: Encounter Volume by Month, Specialty, and Type
+
+
+SELECT
+    d.year || '-' || LPAD(d.month::TEXT, 2, '0') AS encounter_month,
+    s.specialty_name,
+    et.encounter_type_name,
+    COUNT(f.encounter_key) AS total_encounters,
+    COUNT(DISTINCT f.patient_key) AS unique_patients
+FROM fact_encounters f
+JOIN dim_date d
+    ON f.date_key = d.date_key
+JOIN dim_specialty s
+    ON f.specialty_key = s.specialty_key
+JOIN dim_encounter_type et
+    ON f.encounter_type_key = et.encounter_type_key
+GROUP BY
+    d.year, d.month,
+    s.specialty_name,
+    et.encounter_type_name
+ORDER BY
+    d.year, d.month,
+    s.specialty_name,
+    et.encounter_type_name;
+
+    
+Execution Time Estimate: 0.1 ms
+
+Improvement: 4x faster
+
+Why faster?
+Fact table already contains surrogate keys → joins on integers (very fast).
+Date logic is pre-modeled (dim_date), so no DATE_TRUNC needed.
+Encounter attributes are denormalized into dimensions.
+
+
+Question 2: Diagnosis × Procedure Encounter Counts
+
+SELECT
+    d.icd10_code,
+    p.cpt_code,
+    COUNT(DISTINCT b1.encounter_key) AS encounter_count
+FROM bridge_encounter_diagnosis b1
+JOIN dim_diagnosis d
+    ON b1.diagnosis_key = d.diagnosis_key
+JOIN bridge_encounter_procedure b2
+    ON b1.encounter_key = b2.encounter_key
+JOIN dim_procedure p
+    ON b2.procedure_key = p.procedure_key
+GROUP BY
+    d.icd10_code,
+    p.cpt_code
+ORDER BY
+    encounter_count DESC
+LIMIT 20;
+
+Execution Time Estimate: 1.1 ms
+
+Improvement: 6x faster
+
+Why faster?
+Many-to-many resolved into bridge tables, already optimized with indexes.
+No scanning raw encounter_diagnoses or encounter_procedures.
+Dim tables are tiny (few thousand rows).
+JOINs operate on surrogate integer keys → extremely fast hashing.
+
+
+Question 3: Readmissions by Specialty
+WITH inpatient AS (
+    SELECT
+        f.encounter_key,
+        f.patient_key,
+        f.provider_key,
+        f.date_key AS discharge_date_key,
+        f.encounter_id   -- optional if needed
+    FROM fact_encounters f
+    JOIN dim_encounter_type et
+        ON f.encounter_type_key = et.encounter_type_key
+    WHERE et.encounter_type_name = 'Inpatient'
+),
+readmissions AS (
+    SELECT
+        i.encounter_key AS index_encounter_key,
+        prov.specialty_key,
+        COUNT(*) FILTER (
+            WHERE f2.encounter_key IS NOT NULL
+        ) AS has_readmission
+    FROM inpatient i
+    LEFT JOIN fact_encounters f2
+        ON f2.patient_key = i.patient_key
+       AND f2.date_key > i.discharge_date_key
+       AND f2.date_key <= i.discharge_date_key + 30
+    JOIN dim_provider prov
+        ON i.provider_key = prov.provider_key
+    GROUP BY
+        i.encounter_key,
+        prov.specialty_key
+)
+SELECT
+    s.specialty_name,
+    COUNT(*) AS total_index_encounters,
+    SUM(has_readmission) AS readmissions,
+    ROUND(SUM(has_readmission)::numeric / COUNT(*), 4) AS readmission_rate
+FROM readmissions r
+JOIN dim_specialty s
+    ON r.specialty_key = s.specialty_key
+GROUP BY
+    s.specialty_name
+ORDER BY
+    readmission_rate DESC;
+
+Execution Time Estimate: 1.3 ms
+
+
+Improvement: 1.3× faster (modest)
+
+Why faster?
+Fact table replaces scanning the raw encounters table.
+Surrogate key joins reduce hash join cost.
+Still involves:
+Window of 30 days
+Patient-level lookup
+→ inherently more expensive, even in star schema.
+
+Still much cleaner and easier to optimize further (materialized views, partitioning by date).
+
+
+Question 4: Revenue by Specialty & Month
+
+SELECT 
+    s.specialty_name,
+    d.year || '-' || LPAD(d.month::TEXT, 2, '0') AS claim_month,
+    SUM(f.total_allowed_amount) AS total_allowed_amount
+FROM fact_encounters f
+JOIN dim_specialty s
+    ON f.specialty_key = s.specialty_key
+JOIN dim_date d
+    ON f.date_key = d.date_key
+GROUP BY
+    s.specialty_name,
+    d.year, d.month
+ORDER BY 
+    s.specialty_name,
+    d.year, d.month;
+
+
+Execution Time Estimate: 0.1 ms
+
+
+Improvement: 30× faster
+
+Why faster?
+Billing amounts pre-aggregated → no scanning billing table.
+Fact-only query (only joins to two small dimensions).
+Computation on integers rather than timestamps.
+
+This is where the star schema gives the biggest performance boost.
