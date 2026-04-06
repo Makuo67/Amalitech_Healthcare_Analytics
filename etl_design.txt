@@ -1,0 +1,200 @@
+ETL DESIGN DOCUMENT
+-------------------
+
+This document describes the ETL logic used to populate the star schema, including
+dimension loads, fact loads, bridge table loads, and refresh strategy.
+
+
+===========================================================
+1. DIMENSION LOAD LOGIC
+
+
+---------------------------
+1.1 dim_patient Load Logic
+
+Source: OLTP "patients" table.
+
+Steps:
+1. Extract all rows from patients.
+2. Transform:
+   - Create a surrogate key (patient_key) using a sequence.
+   - Convert date_of_birth into derived fields:
+       age = current_date - date_of_birth
+       age_group = CASE WHEN age < 18 THEN 'Child'
+                        WHEN age BETWEEN 18 AND 64 THEN 'Adult'
+                        ELSE 'Senior' END
+   - Standardize gender to ('M','F','U').
+3. Load:
+   - Insert new patient rows into dim_patient.
+   - For updates (e.g., demographic changes):
+       * Use Type 1 SCD (overwrite existing attributes).
+       * patient_key stays the same.
+   - For MRN changes:
+       * Either overwrite (Type 1) or create a new row (Type 2).
+       * For this project, we use Type 1.
+
+-------------------------
+1.2 dim_date Load Logic
+
+Source: Generated once, not derived from OLTP.
+
+Steps:
+1. Create a range of dates covering at least 20 years (2010–2030).
+2. For each date, compute:
+   - date_key (YYYYMMDD integer)
+   - calendar_date
+   - year, month, day
+   - quarter
+   - month_name, day_name
+   - week_of_year
+3. Load:
+   - Insert all rows into dim_date.
+   - No updates needed (static dimension).
+
+-----------------------------------
+1.3 dim_provider & dim_specialty
+
+Source: providers, specialties.
+
+Steps:
+1. Extract rows from providers table.
+2. Lookup specialty_id → specialty_key from dim_specialty.
+3. Transform provider attributes:
+   - full_name = CONCAT(first_name, ' ', last_name)
+4. Load:
+   - Insert rows into dim_provider.
+   - Use Type 1 updates for credential changes, department changes.
+
+----------------------------
+1.4 dim_department
+
+Source: OLTP departments table.
+
+Load procedure:
+- One row per department.
+- Type 1 SCD for capacity changes.
+
+--------------------------------------
+1.5 dim_encounter_type
+
+Source: distinct encounter types from encounters table.
+
+Load procedure:
+- Create 3 rows: Outpatient, Inpatient, ER.
+- This dimension is static and rarely updated.
+
+
+===========================================================
+2. FACT TABLE LOAD LOGIC (fact_encounters)
+
+
+Source tables:
+- encounters
+- billing
+- encounter_diagnoses
+- encounter_procedures
+
+------------------------------
+2.1 Lookup Dimension Keys
+
+For each encounter row:
+1. Lookup patient_key from dim_patient where patient_id = encounters.patient_id.
+2. Lookup provider_key from dim_provider.
+3. Lookup specialty_key via provider.
+4. Lookup department_key via encounters.department_id.
+5. Lookup encounter_type_key using encounter_type dimension.
+6. Lookup date_key using encounter_date from dim_date.
+7. Lookup billing_date_key from claim_date.
+
+----------------------------------
+2.2 Pre-Aggregated Metrics
+
+For each encounter:
+1. diagnosis_count = COUNT(*) from encounter_diagnoses.
+2. procedure_count = COUNT(*) from encounter_procedures.
+3. total_allowed_amount = SUM(allowed_amount) from billing.
+4. claim_count = COUNT(billing_id).
+
+These metrics are computed *once* in ETL and stored in fact_encounters
+to avoid expensive runtime aggregation.
+
+------------------------------
+2.3 Handling Missing Data
+
+- If billing is missing → total_allowed_amount = 0.
+- If procedure/diagnosis missing → count = 0.
+- If provider or specialty is missing → assign “Unknown” surrogate key = 0.
+- If dates are NULL → default to "Unknown" date_key = 0.
+
+------------------------------
+2.4 Fact Table Insert
+
+- Insert one row per encounter (fact grain).
+- Fact table uses integer surrogate keys only.
+- Add indexes on (date_key), (specialty_key, date_key).
+
+
+===========================================================
+3. BRIDGE TABLE LOAD LOGIC
+
+
+---------------------------------------------
+3.1 bridge_encounter_diagnoses
+
+For each encounter in encounter_diagnoses:
+1. Lookup encounter_key in fact table.
+2. Lookup diagnosis_key in dim_diagnosis.
+3. Insert:
+   (encounter_key, diagnosis_key, diagnosis_sequence)
+
+Why?
+Many-to-many relationship (encounter can have multiple diagnoses).
+
+------------------------------------------------
+3.2 bridge_encounter_procedures
+
+For each encounter in encounter_procedures:
+1. Lookup encounter_key in fact table.
+2. Lookup procedure_key in dim_procedure.
+3. Insert:
+   (encounter_key, procedure_key, procedure_date_key)
+
+
+===========================================================
+4. REFRESH STRATEGY
+
+
+-----------------------------------
+4.1 Load Frequency
+
+- Daily incremental load recommended.
+- Dimensions loaded first, then fact table, then bridge tables.
+
+Steps:
+1. Load new patients, providers, departments.
+2. Update changed rows using SCD Type 1.
+3. Insert new encounters into fact.
+4. Insert new diagnoses / procedures into bridge tables.
+
+-----------------------------------
+4.2 Late-Arriving Facts
+
+If a late encounter arrives:
+- Perform lookup of all dimension keys.
+- If dimension row is missing, insert new dimension row.
+- Insert the fact row afterwards.
+
+-----------------------------------
+4.3 Late-Arriving Dimensions
+
+If a provider or specialty is missing when fact is loaded:
+- Temporarily assign "Unknown" key (0).
+- After late dimension row arrives:
+  - Update fact rows with correct surrogate key.
+
+-----------------------------------
+4.4 Full Refresh (rare)
+
+Only recommended if:
+- Dimension structures change.
+- Significant schema redesign.
