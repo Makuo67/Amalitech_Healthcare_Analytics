@@ -1,0 +1,175 @@
+Design Decision
+
+Decision 1: Fact Table Grain
+
+Option A — One row per encounter
+
+Justification
+
+A grain of one row per encounter is the most optimal for the four analytical queries in this project. This level of granularity allows us to:
+
+Aggregate metrics at the encounter, provider, specialty, and department level.
+Calculate readmissions, encounter counts, unique patients, and financial metrics efficiently.
+Avoid generating extremely large fact tables (as would happen in diagnosis-level or procedure-level grains).
+Support joins to other dimensions using surrogate keys without duplicating rows.
+
+A diagnosis-level or procedure-level grain would unnecessarily expand the fact table and slow down queries that are encounter-centered.
+
+
+Decision 2: Dimension Tables
+
+The star schema will include the following dimensions.
+
+1. Date Dimension
+
+Provides precomputed date attributes for analytics.
+
+Attributes:
+
+date_key (PK, surrogate key)
+full_date
+day
+week
+month
+month_name
+quarter
+year
+day_of_week
+is_weekend
+iso_week
+fiscal_period (optional)
+
+Used for encounter_date, discharge_date, and claim_date.
+
+2. Patient Dimension
+
+Attributes:
+
+patient_key (PK)
+patient_id (natural key)
+first_name
+last_name
+gender
+date_of_birth
+birth_year
+age_group (pre-bucketed: 0–17, 18–44, 45–64, 65+)
+3. Provider Dimension
+
+Attributes:
+
+provider_key (PK)
+provider_id (natural key)
+provider_first_name
+provider_last_name
+credential
+specialty_key (FK → dim_specialty)
+department_key (FK → dim_department)
+
+Note: In a star schema, specialty & department are separate dimensions, not columns inside provider.
+
+4. Specialty Dimension
+
+Attributes:
+
+specialty_key (PK)
+specialty_id (natural key)
+specialty_name
+specialty_code
+5. Department Dimension
+
+Attributes:
+
+department_key (PK)
+department_id (natural key)
+department_name
+floor
+capacity
+6. Encounter Type Dimension
+
+Attributes:
+
+encounter_type_key (PK)
+encounter_type (Inpatient, Outpatient, ER)
+7. Diagnosis Dimension (Optional but recommended)
+
+Attributes:
+
+diagnosis_key (PK)
+diagnosis_id (natural key)
+icd10_code
+icd10_description
+
+Used only if building a diagnosis bridge table.
+
+8. Procedure Dimension (Optional but recommended)
+
+Attributes:
+
+procedure_key (PK)
+procedure_id (natural key)
+cpt_code
+cpt_description
+
+Used only if building a procedure bridge table.
+
+Decision 3: Pre-Aggregated Metrics
+
+The encounter-level fact table will store metrics that are expensive to compute repeatedly from the OLTP system.
+
+Metrics to store:
+- diagnosis_count
+
+Number of diagnoses associated with this encounter.
+
+- procedure_count
+
+Number of procedures associated with this encounter.
+
+- total_claim_amount
+
+Sum of all claim_amount values for that encounter.
+
+- total_allowed_amount
+
+Sum of all allowed_amount values for that encounter.
+
+- has_readmission (0/1)
+
+Indicates whether a readmission occurred within 30 days.
+
+- length_of_stay (in days)
+
+Computed from discharge_date and encounter_date.
+
+Why Pre-Aggregation Helps Performance
+Reduces the need for complex multi-join operations.
+Avoids repeatedly scanning the encounter_diagnoses and encounter_procedures tables.
+Eliminates COUNT(DISTINCT) operations, which are slow.
+Allows BI queries to operate on a single clean fact table.
+Moves computation from query-time to ETL-time, improving dashboard performance dramatically.
+Decision 4: Bridge Tables
+- Yes — Use bridge tables for many-to-many relationships.
+
+In healthcare, diagnoses and procedures have true many-to-many relationships with encounters:
+
+One encounter may have multiple diagnoses.
+One encounter may have multiple procedures.
+This cannot be handled efficiently in a single fact table without row explosion.
+Bridge Tables to include:
+fact_encounter_diagnosis_bridge
+encounter_key
+diagnosis_key
+diagnosis_sequence
+fact_encounter_procedure_bridge
+encounter_key
+procedure_key
+procedure_date
+
+Decision 4
+Why bridge tables are needed
+Prevents the fact table grain from becoming “per diagnosis” or “per procedure.”
+Avoids large Cartesian explosion during joins.
+Supports detailed clinical analyses without duplicating fact table rows.
+Gives flexibility to analysts querying diagnoses or procedures separately.
+
+Without bridge tables, diagnosis × procedure combinations can explode into millions of rows per query.
