@@ -1,0 +1,196 @@
+QUESTION 1: Monthly Encounters by Specialty
+
+SQL Query:
+EXPLAIN ANALYZE
+SELECT
+    TO_CHAR(DATE_TRUNC('month', e.encounter_date), 'YYYY-MM') AS encounter_month,
+    s.specialty_name,
+    e.encounter_type,
+    COUNT(e.encounter_id) AS total_encounters,
+    COUNT(DISTINCT e.patient_id) AS unique_patients
+FROM encounters e
+JOIN providers p 
+    ON e.provider_id = p.provider_id
+JOIN specialties s 
+    ON p.specialty_id = s.specialty_id
+GROUP BY
+    DATE_TRUNC('month', e.encounter_date),
+    s.specialty_name,
+    e.encounter_type
+ORDER BY
+    DATE_TRUNC('month', e.encounter_date),
+    s.specialty_name,
+    e.encounter_type;
+
+Schema Analysis:
+Tables joined: 
+ - encounters
+ - providers
+ - specialties
+
+Number of joins: 3
+
+Performance:
+Execution Time: 0.316 ms
+Estimated rows scanned: 450
+
+Bottleneck Identified:
+This query becomes slow because it performs a multi-column GROUP BY, including a function-wrapped date (DATE_TRUNC), which prevents index usage and forces PostgreSQL to scan and aggregate the full encounters table. 
+It also requires joining encounters to providers and specialties, and computing a costly COUNT(DISTINCT) for unique patients. 
+These operations are expensive in a normalized OLTP schema and would be far more efficient in a star schema with precomputed date keys and dimensions.
+
+
+QUESTION 2: Top Diagnosis-Procedure Pairs
+
+SQL Query:
+EXPLAIN ANALYZE
+SELECT
+    d.icd10_code,
+    pr.cpt_code,
+    COUNT(DISTINCT ed.encounter_id) AS encounter_count
+FROM encounter_diagnoses ed
+JOIN diagnoses d
+    ON ed.diagnosis_id = d.diagnosis_id
+JOIN encounter_procedures ep
+    ON ed.encounter_id = ep.encounter_id
+JOIN procedures pr
+    ON ep.procedure_id = pr.procedure_id
+GROUP BY
+    d.icd10_code,
+    pr.cpt_code
+ORDER BY
+    encounter_count DESC
+LIMIT 20;
+
+Schema Analysis:
+Tables joined: 
+ - encounter_diagnoses
+ - diagnoses
+ - encounter_procedures
+ - procedures
+
+Number of joins: 3
+
+Performance:
+Execution Time: 0.316 ms
+Estimated rows scanned: 1850
+
+Bottleneck Identified:
+This query is slow because it joins two many-to-many clinical coding tables, which creates a large diagnosis × procedure cross-product for each encounter. 
+This produces a huge intermediate result that must then be aggregated using a costly COUNT(DISTINCT ...). 
+Additionally, the query performs a full table scan on all four tables and a heavy GROUP BY operation. 
+The normalized OLTP schema forces these expensive joins; at scale, this becomes a major bottleneck.
+
+QUESTION 3: 30-Day Readmission Rate
+
+SQL Query:
+EXPLAIN ANALYZE
+WITH inpatient_encounters AS (
+    SELECT
+        e.encounter_id,
+        e.patient_id,
+        e.provider_id,
+        e.discharge_date,
+        p.specialty_id
+    FROM encounters e
+    JOIN providers p
+        ON e.provider_id = p.provider_id
+    WHERE e.encounter_type = 'Inpatient'
+      AND e.discharge_date IS NOT NULL
+),
+readmissions AS (
+    SELECT
+        i.encounter_id AS index_encounter_id,
+        i.specialty_id,
+        COUNT(*) FILTER (
+            WHERE e2.encounter_id IS NOT NULL
+        ) AS has_readmission
+    FROM inpatient_encounters i
+    LEFT JOIN encounters e2
+        ON i.patient_id = e2.patient_id
+       AND e2.encounter_date > i.discharge_date
+       AND e2.encounter_date <= i.discharge_date + INTERVAL '30 days'
+    GROUP BY
+        i.encounter_id,
+        i.specialty_id
+)
+SELECT
+    s.specialty_name,
+    COUNT(*) AS total_index_encounters,
+    SUM(has_readmission) AS readmissions,
+    ROUND(
+        SUM(has_readmission)::numeric / COUNT(*),
+        4
+    ) AS readmission_rate
+FROM readmissions r
+JOIN specialties s
+    ON r.specialty_id = s.specialty_id
+GROUP BY
+    s.specialty_name
+ORDER BY
+    readmission_rate DESC;
+
+Schema Analysis:
+Tables joined: 
+ - encounters
+ - providers
+ - specialties
+
+Number of joins: 3
+
+Performance:
+Execution time: 1.355 ms
+Estimated rows scanned: 280
+
+Bottleneck Identified:
+This query is slow because it performs a self-join on the encounters table to detect 30-day readmissions, applies non-index-friendly date range conditions, and then aggregates large intermediate results. 
+The normalized OLTP schema forces multiple joins and re-scans of the same table. 
+At scale, these operations become expensive.
+
+
+
+QUESTION 4: Revenue by Specialty & Month
+
+SQL Query:
+
+EXPLAIN ANALYZE
+SELECT 
+    s.specialty_name,
+    TO_CHAR(b.claim_date, 'YYYY-MM') AS claim_month,
+    SUM(b.allowed_amount) AS total_allowed_amount
+FROM billing b
+JOIN encounters e 
+    ON b.encounter_id = e.encounter_id
+JOIN providers p
+    ON e.provider_id = p.provider_id
+JOIN specialties s
+    ON p.specialty_id = s.specialty_id
+GROUP BY 
+    s.specialty_name,
+    TO_CHAR(b.claim_date, 'YYYY-MM')
+ORDER BY 
+    s.specialty_name,
+    claim_month;
+
+Schema Analysis:
+Tables joined: 
+ - billing
+ - encounters
+ - providers
+ - specialties
+
+Number of joins: 3
+
+Performance:
+Execution time: 0.353 ms
+Estimated rows scanned: 420
+
+
+Bottleneck Identified:
+Although the runtime is very fast due to small data volume, the query still shows a structural bottleneck:
+
+The planner performs multiple JOINs across normalized tables.
+It must compute a derived month field (TO_CHAR(b.claim_date, 'YYYY-MM')), which prevents index usage on claim_date.
+GROUP BY requires sorting or hashing across rows.
+
+These factors would significantly slow the query at scale.
