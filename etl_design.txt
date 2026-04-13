@@ -2,7 +2,7 @@ ETL DESIGN DOCUMENT
 -------------------
 
 This document describes the ETL logic used to populate the star schema, including
-dimension loads, fact loads, bridge table loads, and refresh strategy.
+dimension loads, fact loads, supporting fact table loads, and refresh strategy.
 
 
 ===========================================================
@@ -27,7 +27,7 @@ Steps:
 3. Load:
    - Insert new patient rows into dim_patient.
    - For updates (e.g., demographic changes):
-       * Use Type 1 SCD (overwrite existing attributes).
+       * We will Type 1 SCD (overwrite existing attributes).
        * patient_key stays the same.
    - For MRN changes:
        * Either overwrite (Type 1) or create a new row (Type 2).
@@ -66,22 +66,6 @@ Steps:
    - Use Type 1 updates for credential changes, department changes.
 
 ----------------------------
-1.4 dim_department
-
-Source: OLTP departments table.
-
-Load procedure:
-- One row per department.
-- Type 1 SCD for capacity changes.
-
---------------------------------------
-1.5 dim_encounter_type
-
-Source: distinct encounter types from encounters table.
-
-Load procedure:
-- Create 3 rows: Outpatient, Inpatient, ER.
-- This dimension is static and rarely updated.
 
 
 ===========================================================

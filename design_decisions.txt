@@ -67,50 +67,7 @@ department_key (FK → dim_department)
 
 Note: In a star schema, specialty & department are separate dimensions, not columns inside provider.
 
-4. Specialty Dimension
 
-Attributes:
-
-specialty_key (PK)
-specialty_id (natural key)
-specialty_name
-specialty_code
-5. Department Dimension
-
-Attributes:
-
-department_key (PK)
-department_id (natural key)
-department_name
-floor
-capacity
-6. Encounter Type Dimension
-
-Attributes:
-
-encounter_type_key (PK)
-encounter_type (Inpatient, Outpatient, ER)
-7. Diagnosis Dimension (Optional but recommended)
-
-Attributes:
-
-diagnosis_key (PK)
-diagnosis_id (natural key)
-icd10_code
-icd10_description
-
-Used only if building a diagnosis bridge table.
-
-8. Procedure Dimension (Optional but recommended)
-
-Attributes:
-
-procedure_key (PK)
-procedure_id (natural key)
-cpt_code
-cpt_description
-
-Used only if building a procedure bridge table.
 
 Decision 3: Pre-Aggregated Metrics
 

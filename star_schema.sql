@@ -1,146 +1,117 @@
--- ============================================================
--- STAR SCHEMA FOR HEALTHCARE ANALYTICS
--- ============================================================
--- ============================================================
--- DIMENSION TABLES
--- ============================================================
--- --------------------------
--- Date Dimension
--- --------------------------
-CREATE TABLE dim_date (
-    date_key INTEGER PRIMARY KEY,
-    -- surrogate key in YYYYMMDD format
-    calendar_date DATE NOT NULL,
-    year INT NOT NULL,
-    month INT NOT NULL,
-    month_name VARCHAR(20),
-    quarter INT NOT NULL,
-    week_of_year INT,
-    day_of_month INT,
-    day_of_week INT,
-    day_name VARCHAR(20)
-);
-COMMENT ON TABLE dim_date IS 'Date dimension for time-based analysis. One row per calendar date.';
--- --------------------------
--- Patient Dimension
--- --------------------------
+----------------------
+--- Patient Dimension
+----------------------
 CREATE TABLE dim_patient (
     patient_key SERIAL PRIMARY KEY,
-    patient_id INT UNIQUE NOT NULL,
-    first_name VARCHAR(100),
-    last_name VARCHAR(100),
-    gender VARCHAR(20),
+    patient_id INT UNIQUE,
+    full_name VARCHAR(200),
+    gender CHAR(1),
+    date_of_birth DATE,
     age INT,
-    age_group VARCHAR(50)
+    age_group VARCHAR(50),
+    effective_date DATE,
+    expiry_date DATE
 );
-COMMENT ON TABLE dim_patient IS 'Patient dimension with demographic attributes. Surrogate key decouples from source system.';
--- --------------------------
--- Specialty Dimension
--- --------------------------
-CREATE TABLE dim_specialty (
-    specialty_key SERIAL PRIMARY KEY,
-    specialty_id INT UNIQUE NOT NULL,
-    specialty_name VARCHAR(255)
-);
-COMMENT ON TABLE dim_specialty IS 'Provider specialty dimension.';
--- --------------------------
--- Department Dimension
--- --------------------------
-CREATE TABLE dim_department (
-    department_key SERIAL PRIMARY KEY,
-    department_id INT UNIQUE NOT NULL,
-    department_name VARCHAR(255)
-);
-COMMENT ON TABLE dim_department IS 'Department dimension (e.g., Radiology, Surgery).';
--- --------------------------
--- Encounter Type Dimension
--- --------------------------
-CREATE TABLE dim_encounter_type (
-    encounter_type_key SERIAL PRIMARY KEY,
-    encounter_type_name VARCHAR(50) UNIQUE NOT NULL
-);
-COMMENT ON TABLE dim_encounter_type IS 'Encounter type dimension (Outpatient, Inpatient, ER, etc.).';
--- --------------------------
+---------------------
 -- Provider Dimension
--- --------------------------
+----------------------
 CREATE TABLE dim_provider (
     provider_key SERIAL PRIMARY KEY,
-    provider_id INT UNIQUE NOT NULL,
-    provider_name VARCHAR(255),
-    specialty_key INT REFERENCES dim_specialty(specialty_key),
-    department_key INT REFERENCES dim_department(department_key)
+    provider_id INT UNIQUE,
+    provider_name VARCHAR(200),
+    credential VARCHAR(20),
+    specialty_name VARCHAR(100),
+    specialty_code VARCHAR(10),
+    department_name VARCHAR(100),
+    department_floor INT,
+    effective_date DATE,
+    expiry_date DATE
 );
-COMMENT ON TABLE dim_provider IS 'Provider dimension with specialty + department FKs.';
--- --------------------------
--- Diagnosis Dimension
--- --------------------------
+--------------
+-- Date Dimention
+------------------
+CREATE TABLE dim_date (
+    date_key INT PRIMARY KEY,
+    -- YYYYMMDD
+    full_date DATE NOT NULL UNIQUE,
+    day INT,
+    month INT,
+    month_name VARCHAR(20),
+    quarter INT,
+    year INT,
+    day_of_week VARCHAR(20),
+    is_weekend BOOLEAN
+);
+-------------------------
+--- Diagnosis Dimension
+-------------------------
 CREATE TABLE dim_diagnosis (
     diagnosis_key SERIAL PRIMARY KEY,
-    diagnosis_id INT UNIQUE NOT NULL,
-    icd10_code VARCHAR(20),
-    description VARCHAR(500)
+    diagnosis_id INT,
+    icd10_code VARCHAR(10),
+    icd10_description VARCHAR(200)
 );
-COMMENT ON TABLE dim_diagnosis IS 'Diagnosis dimension (ICD-10).';
--- --------------------------
--- Procedure Dimension
--- --------------------------
+-------------------------
+--- Procedure Dimension
+-------------------------
 CREATE TABLE dim_procedure (
     procedure_key SERIAL PRIMARY KEY,
-    procedure_id INT UNIQUE NOT NULL,
-    cpt_code VARCHAR(20),
-    description VARCHAR(500)
+    procedure_id INT,
+    cpt_code VARCHAR(10),
+    cpt_description VARCHAR(200)
 );
-COMMENT ON TABLE dim_procedure IS 'Procedure dimension (CPT).';
--- ============================================================
--- FACT TABLE
--- ============================================================
--- --------------------------
--- Fact Encounters
--- --------------------------
-CREATE TABLE fact_encounters (
-    encounter_key BIGSERIAL PRIMARY KEY,
-    -- Foreign keys
-    date_key INT REFERENCES dim_date(date_key),
-    patient_key INT REFERENCES dim_patient(patient_key),
-    provider_key INT REFERENCES dim_provider(provider_key),
-    specialty_key INT REFERENCES dim_specialty(specialty_key),
-    department_key INT REFERENCES dim_department(department_key),
-    encounter_type_key INT REFERENCES dim_encounter_type(encounter_type_key),
-    -- Source system identifiers (optional but useful)
-    encounter_id INT NOT NULL UNIQUE,
-    -- Pre-aggregated metrics
-    diagnosis_count INT DEFAULT 0,
-    procedure_count INT DEFAULT 0,
-    total_allowed_amount NUMERIC(12, 2) DEFAULT 0.00
+----------------------------
+---- Encounter Fact Table
+----------------------------
+CREATE TABLE fact_encounter (
+    encounter_key SERIAL PRIMARY KEY,
+    -- Foreign Keys
+    patient_key INT NOT NULL,
+    provider_key INT NOT NULL,
+    encounter_date_key INT NOT NULL,
+    discharge_date_key INT,
+    primary_diagnosis_key INT,
+    -- Degenerate dimension
+    encounter_id INT,
+    encounter_type VARCHAR(50),
+    -- Measures
+    claim_amount DECIMAL(12, 2),
+    allowed_amount DECIMAL(12, 2),
+    length_of_stay INT CHECK (length_of_stay >= 0),
+    CONSTRAINT fk_fact_encounter_patient FOREIGN KEY (patient_key) REFERENCES dim_patient(patient_key),
+    CONSTRAINT fk_fact_encounter_provider FOREIGN KEY (provider_key) REFERENCES dim_provider(provider_key),
+    CONSTRAINT fk_fact_encounter_date FOREIGN KEY (encounter_date_key) REFERENCES dim_date(date_key),
+    CONSTRAINT fk_fact_encounter_discharge_date FOREIGN KEY (discharge_date_key) REFERENCES dim_date(date_key),
+    CONSTRAINT fk_fact_encounter_diagnosis FOREIGN KEY (primary_diagnosis_key) REFERENCES dim_diagnosis(diagnosis_key)
 );
-COMMENT ON TABLE fact_encounters IS 'Core fact table: one row per encounter with pre-aggregated metrics.';
--- Recommended indexes
-CREATE INDEX idx_fact_encounters_date ON fact_encounters(date_key);
-CREATE INDEX idx_fact_encounters_provider ON fact_encounters(provider_key);
-CREATE INDEX idx_fact_encounters_specialty ON fact_encounters(specialty_key);
-CREATE INDEX idx_fact_encounters_enc_type ON fact_encounters(encounter_type_key);
--- ============================================================
--- BRIDGE TABLES (MANY-TO-MANY)
--- ============================================================
--- --------------------------
--- Bridge: Encounter ↔ Diagnoses
--- --------------------------
-CREATE TABLE bridge_encounter_diagnosis (
-    encounter_key BIGINT REFERENCES fact_encounters(encounter_key),
-    diagnosis_key INT REFERENCES dim_diagnosis(diagnosis_key),
-    PRIMARY KEY (encounter_key, diagnosis_key)
+---- Indexes for the fact table
+CREATE INDEX idx_fact_encounter_patient ON fact_encounter(patient_key);
+CREATE INDEX idx_fact_encounter_provider ON fact_encounter(provider_key);
+CREATE INDEX idx_fact_encounter_date ON fact_encounter(encounter_date_key);
+---------------------------------
+-- Supporting Fact for Encounter Diagnosis
+---------------------------------
+CREATE TABLE fact_encounter_diagnosis (
+    encounter_diagnosis_key SERIAL PRIMARY KEY,
+    encounter_key INT,
+    diagnosis_key INT,
+    diagnosis_sequence INT,
+    CONSTRAINT fk_fact_encounter_diagnosis_encounter_key FOREIGN KEY (encounter_key) REFERENCES fact_encounter(encounter_key),
+    CONSTRAINT fk_fact_encounter_diagnosis_diagnosis_key FOREIGN KEY (diagnosis_key) REFERENCES dim_diagnosis(diagnosis_key)
 );
-COMMENT ON TABLE bridge_encounter_diagnosis IS 'Bridge table for encounter-to-diagnosis relationship (many-to-many).';
-CREATE INDEX idx_bridge_enc_diag_enc ON bridge_encounter_diagnosis(encounter_key);
-CREATE INDEX idx_bridge_enc_diag_diag ON bridge_encounter_diagnosis(diagnosis_key);
--- --------------------------
--- Bridge: Encounter ↔ Procedures
--- --------------------------
-CREATE TABLE bridge_encounter_procedure (
-    encounter_key BIGINT REFERENCES fact_encounters(encounter_key),
-    procedure_key INT REFERENCES dim_procedure(procedure_key),
-    PRIMARY KEY (encounter_key, procedure_key)
+---- Index for fact diagnosis
+CREATE INDEX idx_fact_enc_diag_encounter ON fact_encounter_diagnosis(encounter_key);
+-----------------------------------
+-- Supporting Fact for Procedures
+------------------------------------
+CREATE TABLE fact_encounter_procedure (
+    encounter_procedure_key SERIAL PRIMARY KEY,
+    encounter_key INT,
+    procedure_key INT,
+    procedure_date_key INT,
+    CONSTRAINT fk_fact_encounter_procedure_encounter_key FOREIGN KEY (encounter_key) REFERENCES fact_encounter(encounter_key),
+    CONSTRAINT fk_fact_encounter_procedure_procedure_key FOREIGN KEY (procedure_key) REFERENCES dim_procedure(procedure_key),
+    CONSTRAINT fk_fact_encounter_procedure_procedure_date_key FOREIGN KEY (procedure_date_key) REFERENCES dim_date(date_key)
 );
-COMMENT ON TABLE bridge_encounter_procedure IS 'Bridge table for encounter-to-procedure relationship (many-to-many).';
-CREATE INDEX idx_bridge_enc_proc_enc ON bridge_encounter_procedure(encounter_key);
-CREATE INDEX idx_bridge_enc_proc_proc ON bridge_encounter_procedure(procedure_key);
+---- Index for fact procedures
+CREATE INDEX idx_fact_enc_proc_encounter ON fact_encounter_procedure(encounter_key);
