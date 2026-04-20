@@ -13,7 +13,6 @@
 - [Design Decisions](#design-decisions)
 - [Performance Reflections](#performance-reflections)
 - [Future Enhancements](#future-enhancements)
-- [License](#license)
 
 ## Overview
 
@@ -175,10 +174,6 @@ From [reflection.md](reflection.md):
 - Incremental ETL w/ MERGE.
 - Add fact_claim for billing grain.
 - Python Airflow orchestration.
-
-## License
-
-MIT License. See LICENSE (or add one).
 
 ---
 
